@@ -1,9 +1,9 @@
 use std::{fmt::Display, fs::File, io::Read, path::Path, time::SystemTime};
 
 use futures::{StreamExt, stream::BoxStream};
+use thiserror::Error;
 use tokio::sync::mpsc;
 
-use anyhow::{Context, Result, anyhow, bail};
 use graphql_client::{GraphQLQuery, Response};
 use reqwest::Client;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -25,6 +25,51 @@ const SIZE_500MB: u64 = 500 * MEGABYTE;
 const SIZE_10GB: u64 = 10 * 1024 * MEGABYTE;
 const SIZE_50GB: u64 = 50 * 1024 * MEGABYTE;
 
+#[derive(Error, Debug)]
+pub enum AdaptiveError {
+    #[error("HTTP error: {0}")]
+    HttpError(#[from] reqwest::Error),
+
+    #[error("JSON error: {0}")]
+    JsonError(#[from] serde_json::Error),
+
+    #[error("IO error: {0}")]
+    IoError(#[from] std::io::Error),
+
+    #[error("URL parse error: {0}")]
+    UrlParseError(#[from] url::ParseError),
+
+    #[error("File too small for chunked upload: {size} bytes (minimum: {min_size} bytes)")]
+    FileTooSmall { size: u64, min_size: u64 },
+
+    #[error("File too large: {size} bytes exceeds maximum {max_size} bytes")]
+    FileTooLarge { size: u64, max_size: u64 },
+
+    #[error("GraphQL errors: {0:?}")]
+    GraphQLErrors(Vec<graphql_client::Error>),
+
+    #[error("No data returned from GraphQL")]
+    NoGraphQLData,
+
+    #[error("Job not found: {0}")]
+    JobNotFound(Uuid),
+
+    #[error("Failed to initialize chunked upload: {status} - {body}")]
+    ChunkedUploadInitFailed { status: String, body: String },
+
+    #[error("Failed to upload part {part_number}: {status} - {body}")]
+    ChunkedUploadPartFailed {
+        part_number: u64,
+        status: String,
+        body: String,
+    },
+
+    #[error("Failed to create dataset: {0}")]
+    DatasetCreationFailed(String),
+}
+
+type Result<T> = std::result::Result<T, AdaptiveError>;
+
 #[derive(Clone, Debug, Default)]
 pub struct ChunkedUploadProgress {
     pub bytes_uploaded: u64,
@@ -41,10 +86,10 @@ pub enum UploadEvent {
 
 pub fn calculate_upload_parts(file_size: u64) -> Result<(u64, u64)> {
     if file_size < MIN_CHUNK_SIZE_BYTES {
-        bail!(
-            "File size ({} bytes) is too small for chunked upload",
-            file_size
-        );
+        return Err(AdaptiveError::FileTooSmall {
+            size: file_size,
+            min_size: MIN_CHUNK_SIZE_BYTES,
+        });
     }
 
     let mut chunk_size = if file_size < SIZE_500MB {
@@ -64,13 +109,10 @@ pub fn calculate_upload_parts(file_size: u64) -> Result<(u64, u64)> {
 
         if chunk_size > MAX_CHUNK_SIZE_BYTES {
             let max_file_size = MAX_CHUNK_SIZE_BYTES * MAX_PARTS_COUNT;
-            bail!(
-                "File size ({} bytes) exceeds maximum uploadable size ({} bytes = {} parts * {} bytes)",
-                file_size,
-                max_file_size,
-                MAX_PARTS_COUNT,
-                MAX_CHUNK_SIZE_BYTES
-            );
+            return Err(AdaptiveError::FileTooLarge {
+                size: file_size,
+                max_size: max_file_size,
+            });
         }
 
         total_parts = file_size.div_ceil(chunk_size);
@@ -91,7 +133,7 @@ type JSON = Value;
 pub struct Timestamp(pub SystemTime);
 
 impl<'de> serde::Deserialize<'de> for Timestamp {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
@@ -269,9 +311,9 @@ impl AdaptiveClient {
             Some(data) => Ok(data),
             None => {
                 if let Some(errors) = response_body.errors {
-                    bail!("GraphQL errors: {:?}", errors);
+                    return Err(AdaptiveError::GraphQLErrors(errors));
                 }
-                Err(anyhow!("No data returned from GraphQL query"))
+                Err(AdaptiveError::NoGraphQLData)
             }
         }
     }
@@ -295,7 +337,7 @@ impl AdaptiveClient {
 
         match response_data.job {
             Some(job) => Ok(job),
-            None => Err(anyhow!("Job with ID '{}' not found", job_id)),
+            None => Err(AdaptiveError::JobNotFound(job_id)),
         }
     }
 
@@ -316,9 +358,7 @@ impl AdaptiveClient {
 
         let file_map = r#"{ "0": ["variables.file"] }"#;
 
-        let dataset_file = reqwest::multipart::Part::file(dataset)
-            .await
-            .context("Unable to read dataset")?;
+        let dataset_file = reqwest::multipart::Part::file(dataset).await?;
 
         let form = reqwest::multipart::Form::new()
             .text("operations", operations)
@@ -340,9 +380,9 @@ impl AdaptiveClient {
             Some(data) => Ok(data.create_dataset),
             None => {
                 if let Some(errors) = response.errors {
-                    bail!("GraphQL errors: {:?}", errors);
+                    return Err(AdaptiveError::GraphQLErrors(errors));
                 }
-                Err(anyhow!("No data returned from GraphQL mutation"))
+                Err(AdaptiveError::NoGraphQLData)
             }
         }
     }
@@ -366,9 +406,7 @@ impl AdaptiveClient {
 
         let file_map = r#"{ "0": ["variables.file"] }"#;
 
-        let recipe_file = reqwest::multipart::Part::file(recipe)
-            .await
-            .context("Unable to read recipe")?;
+        let recipe_file = reqwest::multipart::Part::file(recipe).await?;
 
         let form = reqwest::multipart::Form::new()
             .text("operations", operations)
@@ -390,9 +428,9 @@ impl AdaptiveClient {
             Some(data) => Ok(data.create_custom_recipe),
             None => {
                 if let Some(errors) = response.errors {
-                    bail!("GraphQL errors: {:?}", errors);
+                    return Err(AdaptiveError::GraphQLErrors(errors));
                 }
-                Err(anyhow!("No data returned from GraphQL mutation"))
+                Err(AdaptiveError::NoGraphQLData)
             }
         }
     }
@@ -524,10 +562,7 @@ impl AdaptiveClient {
     }
 
     async fn init_chunked_upload(&self, total_parts: u64) -> Result<String> {
-        let url = self
-            .rest_base_url
-            .join(INIT_CHUNKED_UPLOAD_ROUTE)
-            .context("Failed to construct init upload URL")?;
+        let url = self.rest_base_url.join(INIT_CHUNKED_UPLOAD_ROUTE)?;
 
         let request = InitChunkedUploadRequest {
             content_type: "application/jsonl".to_string(),
@@ -544,11 +579,10 @@ impl AdaptiveClient {
             .await?;
 
         if !response.status().is_success() {
-            bail!(
-                "Failed to initialize chunked upload: {} - {}",
-                response.status(),
-                response.text().await.unwrap_or_default()
-            );
+            return Err(AdaptiveError::ChunkedUploadInitFailed {
+                status: response.status().to_string(),
+                body: response.text().await.unwrap_or_default(),
+            });
         }
 
         let init_response: InitChunkedUploadResponse = response.json().await?;
@@ -564,10 +598,7 @@ impl AdaptiveClient {
     ) -> Result<()> {
         const SUB_CHUNK_SIZE: usize = 64 * 1024;
 
-        let url = self
-            .rest_base_url
-            .join(UPLOAD_PART_ROUTE)
-            .context("Failed to construct upload part URL")?;
+        let url = self.rest_base_url.join(UPLOAD_PART_ROUTE)?;
 
         let chunks: Vec<Vec<u8>> = data
             .chunks(SUB_CHUNK_SIZE)
@@ -597,22 +628,18 @@ impl AdaptiveClient {
             .await?;
 
         if !response.status().is_success() {
-            bail!(
-                "Failed to upload part {}: {} - {}",
+            return Err(AdaptiveError::ChunkedUploadPartFailed {
                 part_number,
-                response.status(),
-                response.text().await.unwrap_or_default()
-            );
+                status: response.status().to_string(),
+                body: response.text().await.unwrap_or_default(),
+            });
         }
 
         Ok(())
     }
 
     async fn abort_chunked_upload(&self, session_id: &str) -> Result<()> {
-        let url = self
-            .rest_base_url
-            .join(ABORT_CHUNKED_UPLOAD_ROUTE)
-            .context("Failed to construct abort upload URL")?;
+        let url = self.rest_base_url.join(ABORT_CHUNKED_UPLOAD_ROUTE)?;
 
         let request = AbortChunkedUploadRequest {
             session_id: session_id.to_string(),
@@ -661,9 +688,7 @@ impl AdaptiveClient {
         key: &'a str,
         dataset: P,
     ) -> Result<BoxStream<'a, Result<UploadEvent>>> {
-        let file_size = std::fs::metadata(dataset.as_ref())
-            .context("Failed to get file metadata")?
-            .len();
+        let file_size = std::fs::metadata(dataset.as_ref())?.len();
 
         let (total_parts, chunk_size) = calculate_upload_parts(file_size)?;
 
@@ -675,15 +700,14 @@ impl AdaptiveClient {
 
             let session_id = self.init_chunked_upload(total_parts).await?;
 
-            let mut file =
-                File::open(dataset.as_ref()).context("Failed to open dataset file")?;
+            let mut file = File::open(dataset.as_ref())?;
             let mut buffer = vec![0u8; chunk_size as usize];
             let mut bytes_uploaded = 0u64;
 
             let (progress_tx, mut progress_rx) = mpsc::channel::<u64>(64);
 
             for part_number in 1..=total_parts {
-                let bytes_read = file.read(&mut buffer).context("Failed to read chunk")?;
+                let bytes_read = file.read(&mut buffer)?;
                 let chunk_data = buffer[..bytes_read].to_vec();
 
                 let upload_fut = self.upload_part(&session_id, part_number, chunk_data, progress_tx.clone());
@@ -721,7 +745,7 @@ impl AdaptiveClient {
                 }
                 Err(e) => {
                     let _ = self.abort_chunked_upload(&session_id).await;
-                    Err(anyhow!("Failed to create dataset: {}", e))?;
+                    Err(AdaptiveError::DatasetCreationFailed(e.to_string()))?;
                 }
             }
         };
