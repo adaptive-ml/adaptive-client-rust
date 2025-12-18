@@ -2,6 +2,8 @@
 name = "adaptive-client-rust"
 version = "0.1.0"
 edition = "2024"
+description = "A client for interacting with the Adaptive platform"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 async-stream = "0.3"
