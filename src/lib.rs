@@ -284,7 +284,7 @@ pub struct GetDataset;
 #[graphql(
     schema_path = "schema.gql",
     query_path = "src/graphql/model_config.graphql",
-    response_derives = "Debug, Clone"
+    response_derives = "Debug, Clone, Serialize"
 )]
 pub struct GetModelConfig;
 
