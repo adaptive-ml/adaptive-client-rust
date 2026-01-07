@@ -307,7 +307,10 @@ impl AdaptiveClient {
             .expect("Failed to append graphql to base URL");
 
         let client = Client::builder()
-            .user_agent(format!("adaptive-client-rust/{}", env!("CARGO_PKG_VERSION")))
+            .user_agent(format!(
+                "adaptive-client-rust/{}",
+                env!("CARGO_PKG_VERSION")
+            ))
             .build()
             .expect("Failed to build HTTP client");
 
