@@ -264,10 +264,35 @@ pub struct ListComputePools;
 )]
 pub struct GetRecipe;
 
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/graphql/grader.graphql",
+    response_derives = "Debug, Clone, Serialize"
+)]
+pub struct GetGrader;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/graphql/dataset.graphql",
+    response_derives = "Debug, Clone"
+)]
+pub struct GetDataset;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "schema.gql",
+    query_path = "src/graphql/model_config.graphql",
+    response_derives = "Debug, Clone, Serialize"
+)]
+pub struct GetModelConfig;
+
 const INIT_CHUNKED_UPLOAD_ROUTE: &str = "v1/upload/init";
 const UPLOAD_PART_ROUTE: &str = "v1/upload/part";
 const ABORT_CHUNKED_UPLOAD_ROUTE: &str = "v1/upload/abort";
 
+#[derive(Clone)]
 pub struct AdaptiveClient {
     client: Client,
     graphql_url: Url,
@@ -281,8 +306,16 @@ impl AdaptiveClient {
             .join("graphql")
             .expect("Failed to append graphql to base URL");
 
+        let client = Client::builder()
+            .user_agent(format!(
+                "adaptive-client-rust/{}",
+                env!("CARGO_PKG_VERSION")
+            ))
+            .build()
+            .expect("Failed to build HTTP client");
+
         Self {
-            client: Client::new(),
+            client,
             graphql_url,
             rest_base_url: api_base_url,
             auth_token,
@@ -559,6 +592,50 @@ impl AdaptiveClient {
 
         let response_data = self.execute_query(GetRecipe, variables).await?;
         Ok(response_data.custom_recipe)
+    }
+
+    pub async fn get_grader(
+        &self,
+        id_or_key: &str,
+        use_case: &str,
+    ) -> Result<get_grader::GetGraderGrader> {
+        let variables = get_grader::Variables {
+            id: id_or_key.to_string(),
+            use_case: use_case.to_string(),
+        };
+
+        let response_data = self.execute_query(GetGrader, variables).await?;
+        Ok(response_data.grader)
+    }
+
+    pub async fn get_dataset(
+        &self,
+        id_or_key: &str,
+        use_case: &str,
+    ) -> Result<Option<get_dataset::GetDatasetDataset>> {
+        let variables = get_dataset::Variables {
+            id_or_key: id_or_key.to_string(),
+            use_case: use_case.to_string(),
+        };
+
+        let response_data = self.execute_query(GetDataset, variables).await?;
+        Ok(response_data.dataset)
+    }
+
+    pub async fn get_model_config(
+        &self,
+        id_or_key: &str,
+    ) -> Result<Option<get_model_config::GetModelConfigModel>> {
+        let variables = get_model_config::Variables {
+            id_or_key: id_or_key.to_string(),
+        };
+
+        let response_data = self.execute_query(GetModelConfig, variables).await?;
+        Ok(response_data.model)
+    }
+
+    pub fn base_url(&self) -> &Url {
+        &self.rest_base_url
     }
 
     async fn init_chunked_upload(&self, total_parts: u64) -> Result<String> {
