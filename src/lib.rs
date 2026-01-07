@@ -292,6 +292,7 @@ const INIT_CHUNKED_UPLOAD_ROUTE: &str = "v1/upload/init";
 const UPLOAD_PART_ROUTE: &str = "v1/upload/part";
 const ABORT_CHUNKED_UPLOAD_ROUTE: &str = "v1/upload/abort";
 
+#[derive(Clone)]
 pub struct AdaptiveClient {
     client: Client,
     graphql_url: Url,
