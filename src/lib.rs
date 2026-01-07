@@ -268,7 +268,7 @@ pub struct GetRecipe;
 #[graphql(
     schema_path = "schema.gql",
     query_path = "src/graphql/grader.graphql",
-    response_derives = "Debug, Clone"
+    response_derives = "Debug, Clone, Serialize"
 )]
 pub struct GetGrader;
 
